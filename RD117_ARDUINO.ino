@@ -33,12 +33,20 @@
 #include <Wire.h>
 #include <SPI.h>
 #include "algorithm_by_RF.h"
-#include "max30102.h"
 
-//#define DEBUG // Uncomment for debug output to the Serial stream
-#define USE_ADALOGGER // Comment out if you don't have ADALOGGER itself but your MCU still can handle this code
+#define DEBUG // Uncomment for debug output to the Serial stream
+//#define USE_ADALOGGER // Comment out if you don't have ADALOGGER itself but your MCU still can handle this code
 //#define TEST_MAXIM_ALGORITHM // Uncomment if you want to include results returned by the original MAXIM algorithm
-//#define SAVE_RAW_DATA // Uncomment if you want raw data coming out of the sensor saved to SD card. Red signal first, IR second.
+#define DEBUG_FLEXIPLOT
+#define SAVE_RAW_DATA // Uncomment if you want raw data coming out of the sensor saved to SD card. Red signal first, IR second.
+#define USE_MAX_30105
+
+#ifdef USE_MAX_30105
+#include "MAX30105.h" //sparkfun MAX3010X library
+MAX30105 particleSensor;
+#else
+#include "max30102.h"
+#endif
 
 #ifdef USE_ADALOGGER
   #include <SD.h>
@@ -82,18 +90,37 @@ void setup() {
   digitalWrite(sdIndicatorPin,LOW);
 #endif
 
-  Wire.begin();
-
 #if defined(DEBUG) || !defined(USE_ADALOGGER)
   // initialize serial communication at 115200 bits per second:
   Serial.begin(115200);
 #endif
 
+#ifdef USE_MAX_30105
+  if (!particleSensor.begin(Wire, I2C_SPEED_FAST)) //Use default I2C port, 400kHz speed
+  {
+    Serial.println("MAX30102 was not found. Please check wiring/power/solder jumper at MH-ET LIVE MAX30102 board. ");
+    while (1);
+  }
+
+  //Setup MAX30102
+  byte ledBrightness = 0x1F; //Options: 0=Off to 255=50mA
+  byte sampleAverage = 8; //Options: 1, 2, 4, 8, 16, 32
+  byte ledMode = 2; //Options: 1 = Red only, 2 = Red + IR, 3 = Red + IR + Green
+  //Options: 1 = IR only, 2 = Red + IR on MH-ET LIVE MAX30102 board
+  int sampleRate = 400; //Options: 50, 100, 200, 400, 800, 1000, 1600, 3200
+  int pulseWidth = 411; //Options: 69, 118, 215, 411
+  int adcRange = 4096; //Options: 2048, 4096, 8192, 16384
+  // Set up the wanted parameters
+  particleSensor.setup(ledBrightness, sampleAverage, ledMode, sampleRate, pulseWidth, adcRange); //Configure sensor with these settings
+#else
+  Wire.begin();
   maxim_max30102_reset(); //resets the MAX30102
   delay(1000);
 
   maxim_max30102_read_reg(REG_INTR_STATUS_1,&uch_dummy);  //Reads/clears the interrupt status register
   maxim_max30102_init();  //initialize the MAX30102
+#endif
+
   old_n_spo2=0.0;
 
 #ifdef USE_ADALOGGER
@@ -210,12 +237,42 @@ void loop() {
   int8_t  ch_hr_valid;  //indicator to show if the heart rate calculation is valid
   int32_t i;
   char hr_str[10];
-     
+
+#ifdef USE_MAX_30105
+  particleSensor.check(); //Check the sensor, read up to 3 samples
+  while (1) {//do we have new data
+    aun_red_buffer[i] = particleSensor.getRed();  //Sparkfun's MAX30105
+    aun_ir_buffer[i] = particleSensor.getIR();  //Sparkfun's MAX30105
+/*
+    #ifdef DEBUG
+    Serial.print(i, DEC);
+    Serial.print(F("\t"));
+    Serial.print(aun_red_buffer[i], DEC);
+    Serial.print(F("\t"));
+    Serial.print(aun_ir_buffer[i], DEC);    
+    Serial.println("");
+    #endif // DEBUG
+*/
+    #ifdef DEBUG_FLEXIPLOT
+    Serial.print("{P0|RED|255,0,0|");
+    Serial.print(aun_red_buffer[i]);
+    Serial.print("|IR|0,0,255|");
+    Serial.print(aun_ir_buffer[i]);
+    Serial.println("}");
+    #endif
+    i++;
+    particleSensor.nextSample();
+    if ((i % BUFFER_SIZE) == 0) { //every Num samples 
+        i = 0;
+        break;
+    }
+  }
+#else     
   //buffer length of BUFFER_SIZE stores ST seconds of samples running at FS sps
   //read BUFFER_SIZE samples, and determine the signal range
   for(i=0;i<BUFFER_SIZE;i++)
   {
-    while(digitalRead(oxiInt)==1);  //wait until the interrupt pin asserts
+    //while(digitalRead(oxiInt)==1);  //wait until the interrupt pin asserts
     maxim_max30102_read_fifo((aun_red_buffer+i), (aun_ir_buffer+i));  //read from MAX30102 FIFO
 #ifdef DEBUG
     Serial.print(i, DEC);
@@ -226,6 +283,7 @@ void loop() {
     Serial.println("");
 #endif // DEBUG
   }
+#endif
 
   //calculate heart rate and SpO2 after BUFFER_SIZE samples (ST seconds of samples) using Robert's method
   rf_heart_rate_and_oxygen_saturation(aun_ir_buffer, BUFFER_SIZE, aun_red_buffer, &n_spo2, &ch_spo2_valid, &n_heart_rate, &ch_hr_valid, &ratio, &correl); 
@@ -393,4 +451,3 @@ void blinkLED(const byte led, bool isOK)
   }
 }
 #endif
-
